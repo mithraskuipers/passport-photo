@@ -29,6 +29,7 @@
     <label>Age <select id="age"><option value="adult">11 years and older</option><option value="child">Up to 10 years</option></select></label>
     <label><input type="checkbox" id="timer"> 5 s timer</label>
   </div>
+  <div id="retouch"></div>
   <ul id="checks"></ul>
   <div id="info"></div>
   <div id="status"></div>
@@ -97,9 +98,7 @@ function capture() {
   canvas.toBlob((b) => {
     if (!b) { setStatus("Capture failed"); return; }
     blob = b;
-    if (previewUrl) URL.revokeObjectURL(previewUrl);
-    previewUrl = URL.createObjectURL(b);
-    preview.src = previewUrl;
+    showPreview();
     preview.style.display = "block";
     $("overlay").style.display = "none";
     $("liveControls").classList.add("hidden");
@@ -107,6 +106,31 @@ function capture() {
     setStatus(Guide.sizeNote(canvas.width, canvas.height));
   }, "image/jpeg", 0.95);
 }
+
+// Review image: the original, or the server retouched version when retouching is on
+let previewTimer = null, previewReq = 0;
+function setPreviewBlob(b) {
+  if (previewUrl) URL.revokeObjectURL(previewUrl);
+  previewUrl = URL.createObjectURL(b);
+  preview.src = previewUrl;
+}
+function showPreview() {
+  clearTimeout(previewTimer);
+  if (!blob) return;
+  if (!Guide.retouchActive()) { previewReq++; setPreviewBlob(blob); return; }
+  const mine = ++previewReq, src = blob;
+  previewTimer = setTimeout(async () => {
+    try {
+      const r = await fetch("/api/retouch?" + Guide.retouchQuery(), {
+        method: "POST", headers: { "Content-Type": "image/jpeg" }, body: src,
+      });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      const out = await r.blob();
+      if (mine === previewReq && blob === src) setPreviewBlob(out);
+    } catch (e) { if (mine === previewReq) setStatus("Retouch preview failed: " + e.message); }
+  }, 150);
+}
+Guide.mountRetouch($("retouch"), showPreview);
 
 function startShot() {
   if (!$("timer").checked) { capture(); return; }
@@ -130,6 +154,9 @@ async function save() {
   try {
     const fd = new FormData();
     fd.append("photo", blob, "photo.jpg");
+    const q = new URLSearchParams(Guide.retouchQuery());
+    fd.append("smooth", q.get("smooth"));
+    fd.append("slim", q.get("slim"));
     const r = await fetch("/api/photos", { method: "POST", body: fd });
     if (!r.ok) throw new Error("HTTP " + r.status);
     const j = await r.json();

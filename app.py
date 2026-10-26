@@ -148,9 +148,13 @@ def upload_photo():
     ext = ALLOWED_TYPES.get(f.mimetype)
     if ext is None:
         abort(415, "Unsupported image type")
+    smooth, slim = retouch_amounts(request.form)
+    data, applied = retouch_bytes(f.read(), smooth, slim)
+    if applied:
+        ext = ".jpg"
     name = new_photo_name(ext)
-    f.save(PHOTO_DIR / name)
-    return jsonify({"name": name}), 201
+    (PHOTO_DIR / name).write_bytes(data)
+    return jsonify({"name": name, "retouched": applied}), 201
 
 
 @app.get("/photos/<path:name>")
@@ -189,6 +193,113 @@ def decode_image(data):
     if img is None:
         abort(400, "Bad image")
     return img
+
+
+# ---- Optional subtle retouching (off unless the user asks for it) ----
+MAX_SMOOTH_ALPHA = 0.6   # at slider 100: blend this much of the smoothed layer into skin
+MAX_SLIM = 0.07          # at slider 100: cheeks and jaw pulled in by up to 7 %
+
+
+def clamp_pct(v):
+    return max(0, min(100, int(v or 0)))
+
+
+def retouch_amounts(src):
+    """Read smooth and slim (0-100) from request.args or request.form."""
+    return clamp_pct(src.get("smooth", 0, type=int)), clamp_pct(src.get("slim", 0, type=int))
+
+
+def find_face(img):
+    """Largest face as (x, y, w, h) in full-resolution pixels, or None."""
+    h, w = img.shape[:2]
+    scale = 560 / w if w > 560 else 1.0
+    small = cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale != 1.0 else img
+    gray = cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+    with _cv_lock:
+        faces = _face.detectMultiScale(gray, 1.1, 6, minSize=(int(small.shape[1] * 0.2),) * 2)
+    if len(faces) == 0:
+        return None
+    x, y, fw, fh = max(faces, key=lambda f: f[2] * f[3])
+    return int(x / scale), int(y / scale), int(fw / scale), int(fh / scale)
+
+
+def smooth_skin(img, face, amount):
+    """Soften fine wrinkles: edge preserving blur, blended in only on skin coloured pixels of the face."""
+    x, y, fw, fh = face
+    h, w = img.shape[:2]
+    d = max(5, int(fw * 0.035) | 1)
+    low = cv2.bilateralFilter(img, d, 28, d * 1.5)
+    low = cv2.bilateralFilter(low, d, 20, d * 1.5)
+
+    ycrcb = cv2.cvtColor(img, cv2.COLOR_BGR2YCrCb)
+    skin = cv2.inRange(ycrcb, (40, 133, 77), (255, 173, 127))
+    skin = cv2.morphologyEx(skin, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+
+    zone = np.zeros((h, w), np.uint8)
+    cv2.ellipse(zone, (x + fw // 2, y + int(fh * 0.55)), (int(fw * 0.5), int(fh * 0.62)), 0, 0, 360, 255, -1)
+    # keep eyes, brows and mouth crisp
+    cv2.rectangle(zone, (x, y + int(fh * 0.22)), (x + fw, y + int(fh * 0.42)), 0, -1)
+    cv2.ellipse(zone, (x + fw // 2, y + int(fh * 0.82)), (int(fw * 0.26), int(fh * 0.09)), 0, 0, 360, 0, -1)
+    mask = cv2.bitwise_and(skin, zone)
+    k = max(3, int(fw * 0.06) | 1)
+    mask = cv2.GaussianBlur(mask, (k, k), 0).astype(np.float32) / 255.0
+
+    # under-eye and forehead lines sit in the excluded band, so allow a gentler pass there
+    band = np.zeros((h, w), np.float32)
+    cv2.rectangle(band, (x + int(fw * 0.1), y + int(fh * 0.08)), (x + int(fw * 0.9), y + int(fh * 0.2)), 1.0, -1)
+    cv2.rectangle(band, (x + int(fw * 0.12), y + int(fh * 0.42)), (x + int(fw * 0.88), y + int(fh * 0.52)), 1.0, -1)
+    band = cv2.GaussianBlur(band, (k, k), 0)
+    soft_skin = cv2.GaussianBlur(skin, (k, k), 0).astype(np.float32) / 255.0
+    mask = np.maximum(mask, band * soft_skin * 0.8)
+
+    alpha = (mask * amount * MAX_SMOOTH_ALPHA)[..., None]
+    return (img * (1 - alpha) + low * alpha).astype(np.uint8)
+
+
+def slim_face(img, face, amount):
+    """Pull the cheeks and jaw slightly towards the centre line. Smooth falloff, plain background stays plain."""
+    x, y, fw, fh = face
+    h, w = img.shape[:2]
+    cx, cy = x + fw / 2, y + fh * 0.72
+    sx, sy = fw * 0.75, fh * 0.38
+    xs, ys = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    weight = np.exp(-(((xs - cx) ** 2) / (2 * sx ** 2) + ((ys - cy) ** 2) / (2 * sy ** 2)))
+    map_x = cx + (xs - cx) * (1 + MAX_SLIM * amount * weight)
+    return cv2.remap(img, map_x.astype(np.float32), ys, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+
+
+def retouch_image(img, smooth, slim):
+    """Returns (image, applied). No face found means the image comes back untouched."""
+    if smooth <= 0 and slim <= 0:
+        return img, False
+    face = find_face(img)
+    if face is None:
+        return img, False
+    if smooth > 0:
+        img = smooth_skin(img, face, smooth / 100.0)
+    if slim > 0:
+        img = slim_face(img, face, slim / 100.0)
+    return img, True
+
+
+def retouch_bytes(data, smooth, slim):
+    """Encoded image in, encoded JPEG out. Returns (bytes, applied)."""
+    if smooth <= 0 and slim <= 0:
+        return data, False
+    out, applied = retouch_image(decode_image(data), smooth, slim)
+    if not applied:
+        return data, False
+    ok, buf = cv2.imencode(".jpg", out, [cv2.IMWRITE_JPEG_QUALITY, 95])
+    return (buf.tobytes(), True) if ok else (data, False)
+
+
+@app.post("/api/retouch")
+def retouch_preview():
+    smooth, slim = retouch_amounts(request.args)
+    data, applied = retouch_bytes(request.get_data(), smooth, slim)
+    resp = no_store(Response(data, mimetype="image/jpeg" if applied else (request.mimetype or "image/jpeg")))
+    resp.headers["X-Retouched"] = "1" if applied else "0"
+    return resp
 
 
 @app.post("/api/analyze")
@@ -301,20 +412,24 @@ def relay_pending():
         data = relay["pending"]
     if data is None:
         abort(404)
+    smooth, slim = retouch_amounts(request.args)
+    data, _ = retouch_bytes(data, smooth, slim)
     return no_store(Response(data, mimetype="image/jpeg"))
 
 
 @app.post("/api/relay/save")
 def relay_save():
+    smooth, slim = retouch_amounts(request.args)
     with relay_lock:
         data = relay["pending"]
         if data is None:
             abort(404)
-        name = new_photo_name(".jpg")
-        (PHOTO_DIR / name).write_bytes(data)
         relay["pending"] = None
         relay["pending_info"] = None
-    return jsonify({"name": name}), 201
+    data, applied = retouch_bytes(data, smooth, slim)
+    name = new_photo_name(".jpg")
+    (PHOTO_DIR / name).write_bytes(data)
+    return jsonify({"name": name, "retouched": applied}), 201
 
 
 @app.post("/api/relay/discard")

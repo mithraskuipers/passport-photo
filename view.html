@@ -28,6 +28,7 @@
     <label><input type="checkbox" id="timer"> 5 s timer</label>
     <label><input type="checkbox" id="mirror" checked> Mirror view</label>
   </div>
+  <div id="retouch"></div>
   <ul id="checks"></ul>
   <div id="info"></div>
   <div id="status"></div>
@@ -56,13 +57,23 @@ function showReview(p) {
   if (reviewN === p.n) return;
   reviewN = p.n;
   shooting = false;
-  preview.src = "/api/relay/pending.jpg?n=" + p.n;
+  refreshPreview();
   preview.style.display = "block";
   $("overlay").style.display = "none";
   $("liveControls").classList.add("hidden");
   $("reviewControls").classList.remove("hidden");
   setStatus(Guide.sizeNote(p.w, p.h));
 }
+
+let previewTimer = null;
+function refreshPreview() {
+  if (reviewN === null) return;
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => {
+    if (reviewN !== null) preview.src = "/api/relay/pending.jpg?n=" + reviewN + "&t=" + Date.now() + "&" + Guide.retouchQuery();
+  }, 150);
+}
+Guide.mountRetouch($("retouch"), refreshPreview);
 
 function leaveReview() {
   dismissed = reviewN;
@@ -131,7 +142,7 @@ async function retake() {
 async function save() {
   $("save").disabled = true;
   try {
-    const r = await fetch("/api/relay/save", { method: "POST" });
+    const r = await fetch("/api/relay/save?" + Guide.retouchQuery(), { method: "POST" });
     if (!r.ok) throw new Error("HTTP " + r.status);
     const j = await r.json();
     leaveReview();

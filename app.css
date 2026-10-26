@@ -17,7 +17,7 @@ button:disabled { opacity: 0.4; }
 #shoot { background: #2f7df6; }
 #save { background: #1f9d55; }
 .hidden { display: none !important; }
-#status { min-height: 22px; margin: 10px 2px 0; font-size: 14px; color: #9a9a9a; }
+#status { min-height: 44px; margin: 10px 2px 0; font-size: 14px; color: #9a9a9a; }
 #status a, .links a { color: #6aa9ff; }
 .links { font-size: 14px; color: #777; margin: 14px 2px 0; }
 .hint { font-size: 14px; color: #aaa; line-height: 1.5; }
@@ -36,9 +36,12 @@ h2 { font-size: 15px; margin: 18px 2px 8px; color: #aaa; font-weight: 600; }
          font-size: 96px; font-weight: 700; color: #fff; text-shadow: 0 2px 12px #000; }
 .opts { display: flex; flex-wrap: wrap; gap: 16px; align-items: center; margin-top: 10px; font-size: 14px; color: #bbb; }
 select { background: #2b2b2b; color: #fff; border: 0; border-radius: 8px; padding: 8px; font-size: 14px; }
-#checks { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 6px; }
-#checks li { display: flex; gap: 8px; align-items: baseline; font-size: 14px; }
-#checks b { min-width: 84px; font-weight: 600; }
+/* Reserve room for the maximum of 9 check rows so nothing below ever moves */
+#checks { list-style: none; margin: 12px 0 0; padding: 0; display: grid; gap: 6px;
+          grid-auto-rows: 20px; grid-template-rows: repeat(9, 20px); height: calc(9 * 20px + 8 * 6px); align-content: start; overflow: hidden; }
+#checks li { display: flex; gap: 8px; align-items: center; font-size: 14px; height: 20px; min-width: 0; }
+#checks li span:last-child { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+#checks b { min-width: 84px; flex: none; font-weight: 600; }
 .dot { width: 10px; height: 10px; border-radius: 50%; flex: none; background: #555; }
 .dot.ok { background: #35d07f; } .dot.warn { background: #f5b942; } .dot.bad { background: #ef5350; }
 details { margin-top: 12px; font-size: 14px; color: #aaa; line-height: 1.5; }
@@ -51,4 +54,8 @@ h1 { font-size: 22px; margin: 8px 2px 4px; }
              display: flex; align-items: center; justify-content: center; font-weight: 700; }
 .card b { display: block; font-size: 16px; margin-bottom: 4px; }
 .card span.t { font-size: 14px; color: #aaa; line-height: 1.4; }
+.rt-row { display: flex; gap: 10px; align-items: center; margin-top: 8px; }
+.rt-row input[type=range] { flex: 1; }
+.rt-row output { min-width: 40px; text-align: right; color: #ccc; }
+.rt-warn { margin: 10px 0 0; font-size: 13px; color: #f5b942; line-height: 1.4; }
 canvas { display: none; }

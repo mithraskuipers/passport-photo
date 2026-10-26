@@ -29,6 +29,46 @@ const Guide = (() => {
       </ul>
     </details>`;
 
+  // ---- Optional subtle retouch (off by default, settings remembered per browser) ----
+  const RT = { on: false, smooth: 30, slim: 20 };
+  try { Object.assign(RT, JSON.parse(localStorage.getItem("retouch") || "{}")); } catch (e) { /* ignore */ }
+  RT.on = !!RT.on;
+  const pct = (v) => Math.max(0, Math.min(100, Math.round(Number(v) || 0)));
+
+  function retouchQuery() {
+    return RT.on ? "smooth=" + pct(RT.smooth) + "&slim=" + pct(RT.slim) : "smooth=0&slim=0";
+  }
+  function retouchActive() { return RT.on && (pct(RT.smooth) > 0 || pct(RT.slim) > 0); }
+
+  function mountRetouch(el, onChange) {
+    el.innerHTML = `
+      <details id="retouchBox" ${RT.on ? "open" : ""}>
+        <summary>Retouch (subtle, optional)</summary>
+        <label class="rt-row"><input type="checkbox" id="rtOn"> Apply retouching to the photo</label>
+        <label class="rt-row">Smooth skin <input type="range" id="rtSmooth" min="0" max="100" step="5"><output id="rtSmoothV"></output></label>
+        <label class="rt-row">Slimmer face <input type="range" id="rtSlim" min="0" max="100" step="5"><output id="rtSlimV"></output></label>
+        <p class="rt-warn">Dutch passport photos must not be edited. A retouched photo can be rejected at the counter. Use this only for non passport purposes, or keep it off.</p>
+      </details>`;
+    const on = $("rtOn"), sm = $("rtSmooth"), sl = $("rtSlim");
+    const sync = () => {
+      on.checked = RT.on;
+      sm.value = pct(RT.smooth); sl.value = pct(RT.slim);
+      $("rtSmoothV").textContent = pct(RT.smooth) + "%";
+      $("rtSlimV").textContent = pct(RT.slim) + "%";
+      sm.disabled = sl.disabled = !RT.on;
+    };
+    const changed = () => {
+      RT.on = on.checked; RT.smooth = pct(sm.value); RT.slim = pct(sl.value);
+      try { localStorage.setItem("retouch", JSON.stringify(RT)); } catch (e) { /* ignore */ }
+      sync();
+      if (onChange) onChange();
+    };
+    on.onchange = changed;
+    sm.oninput = changed;
+    sl.oninput = changed;
+    sync();
+  }
+
   function mount(stage) { stage.insertAdjacentHTML("beforeend", OVERLAY); }
   function mountInfo(el) { el.innerHTML = INFO; }
 
@@ -160,7 +200,7 @@ const Guide = (() => {
   }
 
   function showSaved(el, name) {
-    el.textContent = "Saved. ";
+    el.textContent = retouchActive() ? "Saved (retouched). " : "Saved. ";
     const a = document.createElement("a");
     a.href = "/api/sheet/" + encodeURIComponent(name);
     a.target = "_blank";
@@ -192,5 +232,5 @@ const Guide = (() => {
     } catch (e) { /* ignore */ }
   }
 
-  return { mount, mountInfo, cropRect, updateGuides, evaluate, render, countdown, sizeNote, showSaved, loadGallery };
+  return { mount, mountInfo, mountRetouch, retouchQuery, retouchActive, cropRect, updateGuides, evaluate, render, countdown, sizeNote, showSaved, loadGallery };
 })();
