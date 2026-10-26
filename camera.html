@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111111">
+<title>Pasfoto remote camera</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<main>
+  <div class="stage">
+    <video id="video" autoplay playsinline muted></video>
+    <div id="msg">Starting camera...</div>
+  </div>
+  <div class="row">
+    <button id="flip" disabled>Flip camera</button>
+  </div>
+  <div id="status"></div>
+  <p class="hint">This device is the remote camera. On another device open
+    <b id="url"></b> to see the feed with the guides and to take the photo.
+    Keep this page open with the screen on.</p>
+  <p class="links"><a href="/">Back to menu</a></p>
+</main>
+
+<script src="/assets/guide.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const video = $("video"), msg = $("msg");
+const FW = 560, FH = 720, INTERVAL = 120;
+let stream = null, facing = "environment", lastCmd = null, wake = null;
+
+$("url").textContent = location.origin + "/view";
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const toBlob = (c, q) => new Promise((res) => c.toBlob(res, "image/jpeg", q));
+function setStatus(t) { $("status").textContent = t; }
+
+async function keepAwake() {
+  try { wake = await navigator.wakeLock.request("screen"); } catch (e) { /* not supported or denied */ }
+}
+
+async function startCamera() {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  stream = null;
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    msg.textContent = "Camera API unavailable. Open this page over https:// and accept the certificate warning.";
+    return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: facing }, width: { ideal: 1440 }, height: { ideal: 1920 } },
+      audio: false,
+    });
+    video.srcObject = stream;
+    video.classList.toggle("mirror", facing === "user");
+    await video.play();
+    msg.classList.add("hidden");
+    $("flip").disabled = false;
+    keepAwake();
+  } catch (e) {
+    msg.classList.remove("hidden");
+    msg.textContent = {
+      NotAllowedError: "Camera permission denied. Allow it in Chrome site settings and reload.",
+      NotFoundError: "No camera found on this device.",
+      NotReadableError: "Camera is in use by another app.",
+    }[e.name] || "Could not start camera: " + e.name;
+  }
+}
+
+// Full resolution 7:9 crop, sent when the viewer presses the shutter
+async function shoot() {
+  const r = Guide.cropRect(video.videoWidth, video.videoHeight);
+  const c = document.createElement("canvas");
+  c.width = Math.round(r.cw);
+  c.height = Math.round(r.ch);
+  c.getContext("2d").drawImage(video, r.sx, r.sy, r.cw, r.ch, 0, 0, c.width, c.height);
+  const b = await toBlob(c, 0.95);
+  await fetch("/api/relay/photo", { method: "POST", headers: { "Content-Type": "image/jpeg" }, body: b });
+}
+
+async function loop() {
+  const c = document.createElement("canvas");
+  c.width = FW; c.height = FH;
+  const ctx = c.getContext("2d");
+  for (;;) {
+    const t0 = performance.now();
+    if (stream && video.videoWidth) {
+      try {
+        const r = Guide.cropRect(video.videoWidth, video.videoHeight);
+        ctx.drawImage(video, r.sx, r.sy, r.cw, r.ch, 0, 0, FW, FH);
+        const resp = await fetch("/api/relay/frame", {
+          method: "POST", headers: { "Content-Type": "image/jpeg" }, body: await toBlob(c, 0.72),
+        });
+        const j = await resp.json();
+        setStatus(j.viewer ? "Streaming. Viewer connected." : "Streaming. Waiting for a viewer.");
+        if (lastCmd === null) lastCmd = j.cmd;
+        else if (j.cmd > lastCmd) {
+          lastCmd = j.cmd;
+          setStatus("Taking photo...");
+          await shoot();
+        }
+      } catch (e) {
+        setStatus("Server not reachable, retrying...");
+        await sleep(1000);
+      }
+    }
+    await sleep(Math.max(20, INTERVAL - (performance.now() - t0)));
+  }
+}
+
+$("flip").onclick = () => { facing = facing === "environment" ? "user" : "environment"; startCamera(); };
+document.addEventListener("visibilitychange", () => { if (!document.hidden) keepAwake(); });
+startCamera();
+loop();
+</script>
+</body>
+</html>

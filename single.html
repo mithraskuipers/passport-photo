@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111111">
+<title>Pasfoto</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<main>
+  <div class="stage" id="stage">
+    <video id="video" autoplay playsinline muted></video>
+    <img id="preview" alt="Captured photo">
+    <div id="msg">Tap Start camera</div>
+  </div>
+
+  <div class="row" id="liveControls">
+    <button id="start">Start camera</button>
+    <button id="shoot" disabled>Take photo</button>
+    <button id="flip" disabled>Flip</button>
+  </div>
+  <div class="row hidden" id="reviewControls">
+    <button id="retake">Retake</button>
+    <button id="save">Save</button>
+  </div>
+
+  <div class="opts">
+    <label>Age <select id="age"><option value="adult">11 years and older</option><option value="child">Up to 10 years</option></select></label>
+    <label><input type="checkbox" id="timer"> 5 s timer</label>
+  </div>
+  <ul id="checks"></ul>
+  <div id="info"></div>
+  <div id="status"></div>
+  <p class="links"><a href="/">Back to menu</a></p>
+
+  <h2>Saved photos</h2>
+  <div id="gallery"></div>
+  <canvas id="canvas"></canvas>
+</main>
+
+<script src="/assets/guide.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const video = $("video"), preview = $("preview"), canvas = $("canvas"), msg = $("msg");
+let stream = null, facing = "environment", blob = null, previewUrl = null, analyzing = false;
+
+Guide.mount($("stage"));
+Guide.mountInfo($("info"));
+Guide.updateGuides($("age").value);
+
+function setStatus(t) { $("status").textContent = t || ""; }
+function showMsg(t) { msg.textContent = t; msg.classList.remove("hidden"); }
+
+function stopCamera() {
+  if (stream) stream.getTracks().forEach((t) => t.stop());
+  stream = null;
+}
+
+async function startCamera() {
+  stopCamera();
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showMsg("Camera API unavailable. Open this page over https:// and accept the certificate warning.");
+    return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: facing }, width: { ideal: 1440 }, height: { ideal: 1920 } },
+      audio: false,
+    });
+    video.srcObject = stream;
+    video.classList.toggle("mirror", facing === "user");
+    await video.play();
+    msg.classList.add("hidden");
+    $("shoot").disabled = false;
+    $("flip").disabled = false;
+    $("start").textContent = "Restart";
+    setStatus("");
+  } catch (e) {
+    $("shoot").disabled = true;
+    const text = {
+      NotAllowedError: "Camera permission denied. Allow it in Chrome site settings and tap Start camera again.",
+      NotFoundError: "No camera found on this device.",
+      NotReadableError: "Camera is in use by another app.",
+      OverconstrainedError: "Requested camera is not available.",
+    }[e.name] || "Could not start camera: " + e.name;
+    showMsg(text);
+  }
+}
+
+function capture() {
+  if (!video.videoWidth) return;
+  const r = Guide.cropRect(video.videoWidth, video.videoHeight);
+  canvas.width = Math.round(r.cw);
+  canvas.height = Math.round(r.ch);
+  canvas.getContext("2d").drawImage(video, r.sx, r.sy, r.cw, r.ch, 0, 0, canvas.width, canvas.height);
+  canvas.toBlob((b) => {
+    if (!b) { setStatus("Capture failed"); return; }
+    blob = b;
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    previewUrl = URL.createObjectURL(b);
+    preview.src = previewUrl;
+    preview.style.display = "block";
+    $("overlay").style.display = "none";
+    $("liveControls").classList.add("hidden");
+    $("reviewControls").classList.remove("hidden");
+    setStatus(Guide.sizeNote(canvas.width, canvas.height));
+  }, "image/jpeg", 0.95);
+}
+
+function startShot() {
+  if (!$("timer").checked) { capture(); return; }
+  $("shoot").disabled = true;
+  Guide.countdown(5, () => { $("shoot").disabled = false; capture(); });
+}
+
+function retake() {
+  preview.style.display = "none";
+  $("overlay").style.display = "";
+  blob = null;
+  $("reviewControls").classList.add("hidden");
+  $("liveControls").classList.remove("hidden");
+  setStatus("");
+}
+
+async function save() {
+  if (!blob) return;
+  $("save").disabled = true;
+  setStatus("Uploading...");
+  try {
+    const fd = new FormData();
+    fd.append("photo", blob, "photo.jpg");
+    const r = await fetch("/api/photos", { method: "POST", body: fd });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    retake();
+    Guide.showSaved($("status"), j.name);
+    Guide.loadGallery($("gallery"));
+  } catch (e) {
+    setStatus("Upload failed: " + e.message);
+  } finally {
+    $("save").disabled = false;
+  }
+}
+
+// Live analysis of the preview (7:9 crop, same area that gets saved)
+const AW = 420, AH = 540;
+const acanvas = document.createElement("canvas");
+acanvas.width = AW; acanvas.height = AH;
+const actx = acanvas.getContext("2d");
+
+async function analyzeOnce() {
+  if (!stream || !video.videoWidth || analyzing || blob) return;
+  analyzing = true;
+  try {
+    const r = Guide.cropRect(video.videoWidth, video.videoHeight);
+    actx.drawImage(video, r.sx, r.sy, r.cw, r.ch, 0, 0, AW, AH);
+    const b = await new Promise((res) => acanvas.toBlob(res, "image/jpeg", 0.7));
+    const resp = await fetch("/api/analyze", { method: "POST", headers: { "Content-Type": "image/jpeg" }, body: b });
+    if (resp.ok) Guide.render(await resp.json(), facing === "user", $("age").value);
+  } catch (e) { /* ignore */ } finally { analyzing = false; }
+}
+setInterval(analyzeOnce, 350);
+
+$("start").onclick = startCamera;
+$("shoot").onclick = startShot;
+$("age").onchange = () => Guide.updateGuides($("age").value);
+$("retake").onclick = retake;
+$("save").onclick = save;
+$("flip").onclick = () => { facing = facing === "environment" ? "user" : "environment"; startCamera(); };
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopCamera();
+  else if (!$("start").textContent.startsWith("Start")) startCamera();
+});
+
+Guide.loadGallery($("gallery"));
+startCamera();
+</script>
+</body>
+</html>

@@ -1,3 +1,4 @@
+import base64
 import datetime
 import io
 import ipaddress
@@ -5,6 +6,7 @@ import math
 import socket
 import sys
 import threading
+import time
 import uuid
 from pathlib import Path
 
@@ -96,9 +98,36 @@ def ensure_cert(ip):
     CERT_FILE.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
 
 
+def new_photo_name(ext):
+    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return f"{stamp}_{uuid.uuid4().hex[:6]}{ext}"
+
+
 @app.get("/")
 def index():
     return send_from_directory(BASE_DIR, "index.html")
+
+
+@app.get("/single")
+def single_page():
+    return send_from_directory(BASE_DIR, "single.html")
+
+
+@app.get("/camera")
+def camera_page():
+    return send_from_directory(BASE_DIR, "camera.html")
+
+
+@app.get("/view")
+def view_page():
+    return send_from_directory(BASE_DIR, "view.html")
+
+
+@app.get("/assets/<name>")
+def assets(name):
+    if name not in ("app.css", "guide.js"):
+        abort(404)
+    return send_from_directory(BASE_DIR, name)
 
 
 @app.get("/api/photos")
@@ -119,8 +148,7 @@ def upload_photo():
     ext = ALLOWED_TYPES.get(f.mimetype)
     if ext is None:
         abort(415, "Unsupported image type")
-    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    name = f"{stamp}_{uuid.uuid4().hex[:6]}{ext}"
+    name = new_photo_name(ext)
     f.save(PHOTO_DIR / name)
     return jsonify({"name": name}), 201
 
@@ -156,19 +184,27 @@ def background_stats(img):
     }
 
 
-@app.post("/api/analyze")
-def analyze():
-    """Measure one preview frame (already cropped to 7:9). Returns raw numbers, fractions of the frame."""
-    img = cv2.imdecode(np.frombuffer(request.get_data(), np.uint8), cv2.IMREAD_COLOR)
+def decode_image(data):
+    img = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         abort(400, "Bad image")
+    return img
+
+
+@app.post("/api/analyze")
+def analyze():
+    return jsonify(measure(decode_image(request.get_data())))
+
+
+def measure(img):
+    """Measure one preview frame (already cropped to 7:9). Returns raw numbers, fractions of the frame."""
     h, w = img.shape[:2]
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     out = {"face": None, "eyes": [], "tilt": None, "bg": background_stats(img)}
     with _cv_lock:
         faces = _face.detectMultiScale(gray, 1.1, 6, minSize=(int(w * 0.2), int(w * 0.2)))
         if len(faces) == 0:
-            return jsonify(out)
+            return out
         x, y, fw, fh = (int(v) for v in max(faces, key=lambda f: f[2] * f[3]))
         roi = gray[y:y + fh, x:x + fw]
         eyes = _eye.detectMultiScale(roi[: int(fh * 0.6)], 1.1, 5, minSize=(int(fw * 0.12), int(fw * 0.12)))
@@ -191,7 +227,102 @@ def analyze():
     out["clip_hi"] = round(float((inner >= 250).mean()), 4)
     out["clip_lo"] = round(float((inner <= 8).mean()), 4)
     out["lr"] = round(abs(float(inner[:, :half].mean()) - float(inner[:, half:].mean())) / max(mean, 1.0), 3)
-    return jsonify(out)
+    return out
+
+
+# ---- Remote camera relay: one device streams frames, another views them and triggers the shutter ----
+relay_lock = threading.Lock()
+relay = {"seq": 0, "frame": None, "analysis": None, "ts": 0.0, "viewer_ts": 0.0,
+         "cmd": 0, "pending": None, "pending_info": None, "pending_n": 0}
+ONLINE_SECS = 3
+
+
+def no_store(resp):
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@app.post("/api/relay/frame")
+def relay_frame():
+    """Camera device pushes a 7:9 preview frame. The reply carries the latest shutter command."""
+    data = request.get_data()
+    img = decode_image(data)
+    small = img if img.shape[1] == 420 else cv2.resize(img, (420, 540), interpolation=cv2.INTER_AREA)
+    analysis = measure(small)
+    with relay_lock:
+        relay.update(seq=relay["seq"] + 1, frame=data, analysis=analysis, ts=time.time())
+        viewer = time.time() - relay["viewer_ts"] < ONLINE_SECS
+        return jsonify({"cmd": relay["cmd"], "viewer": viewer})
+
+
+@app.get("/api/relay/state")
+def relay_state():
+    after = request.args.get("after", 0, type=int)
+    now = time.time()
+    with relay_lock:
+        relay["viewer_ts"] = now
+        online = now - relay["ts"] < ONLINE_SECS
+        out = {"online": online, "seq": relay["seq"], "cmd": relay["cmd"], "frame": None,
+               "analysis": relay["analysis"] if online else None, "pending": relay["pending_info"]}
+        if online and relay["seq"] > after:
+            out["frame"] = base64.b64encode(relay["frame"]).decode()
+    return no_store(jsonify(out))
+
+
+@app.post("/api/relay/shoot")
+def relay_shoot():
+    with relay_lock:
+        if time.time() - relay["ts"] >= ONLINE_SECS:
+            abort(409, "Camera is offline")
+        relay["pending"] = None
+        relay["pending_info"] = None
+        relay["cmd"] += 1
+        return jsonify({"cmd": relay["cmd"]})
+
+
+@app.post("/api/relay/photo")
+def relay_photo():
+    """Camera device uploads the full resolution photo after a shutter command."""
+    data = request.get_data()
+    try:
+        w, h = Image.open(io.BytesIO(data)).size
+    except Exception:
+        abort(400, "Bad image")
+    with relay_lock:
+        relay["pending_n"] += 1
+        relay["pending"] = data
+        relay["pending_info"] = {"n": relay["pending_n"], "w": w, "h": h}
+    return jsonify({"ok": True})
+
+
+@app.get("/api/relay/pending.jpg")
+def relay_pending():
+    with relay_lock:
+        data = relay["pending"]
+    if data is None:
+        abort(404)
+    return no_store(Response(data, mimetype="image/jpeg"))
+
+
+@app.post("/api/relay/save")
+def relay_save():
+    with relay_lock:
+        data = relay["pending"]
+        if data is None:
+            abort(404)
+        name = new_photo_name(".jpg")
+        (PHOTO_DIR / name).write_bytes(data)
+        relay["pending"] = None
+        relay["pending_info"] = None
+    return jsonify({"name": name}), 201
+
+
+@app.post("/api/relay/discard")
+def relay_discard():
+    with relay_lock:
+        relay["pending"] = None
+        relay["pending_info"] = None
+    return jsonify({"ok": True})
 
 
 @app.get("/api/sheet/<path:name>")
@@ -229,8 +360,13 @@ def print_banner(ip):
     lines = [
         "CAMERA WEB APP IS RUNNING",
         "",
-        "Open this on your phone (same Wi-Fi):",
+        "Open the menu on your phone or laptop (same Wi-Fi):",
         url,
+        "",
+        "Direct links:",
+        "1 One device:      " + url + "/single",
+        "2 Camera device:   " + url + "/camera",
+        "3 Viewer device:   " + url + "/view",
         "",
         "Chrome will warn about the certificate:",
         "tap Advanced, then Proceed to " + ip,
@@ -249,8 +385,9 @@ def print_banner(ip):
 
 
 def main():
-    if not (BASE_DIR / "index.html").exists():
-        print("index.html not found next to app.py: " + str(BASE_DIR))
+    missing = [f for f in ("index.html", "single.html", "view.html", "camera.html", "app.css", "guide.js") if not (BASE_DIR / f).exists()]
+    if missing:
+        print("Missing next to app.py: " + ", ".join(missing))
         sys.exit(1)
     PHOTO_DIR.mkdir(exist_ok=True)
     ip = get_lan_ip()

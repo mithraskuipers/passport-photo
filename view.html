@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111111">
+<title>Pasfoto viewer</title>
+<link rel="stylesheet" href="/assets/app.css">
+</head>
+<body>
+<main>
+  <div class="stage" id="stage">
+    <img id="feed" alt="">
+    <img id="preview" alt="Captured photo">
+    <div id="msg"></div>
+  </div>
+
+  <div class="row" id="liveControls">
+    <button id="shoot" disabled>Take photo (Space)</button>
+  </div>
+  <div class="row hidden" id="reviewControls">
+    <button id="retake">Retake</button>
+    <button id="save">Save</button>
+  </div>
+
+  <div class="opts">
+    <label>Age <select id="age"><option value="adult">11 years and older</option><option value="child">Up to 10 years</option></select></label>
+    <label><input type="checkbox" id="timer"> 5 s timer</label>
+    <label><input type="checkbox" id="mirror" checked> Mirror view</label>
+  </div>
+  <ul id="checks"></ul>
+  <div id="info"></div>
+  <div id="status"></div>
+  <p class="links"><a href="/">Back to menu</a></p>
+
+  <h2>Saved photos</h2>
+  <div id="gallery"></div>
+</main>
+
+<script src="/assets/guide.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const feed = $("feed"), preview = $("preview"), msg = $("msg");
+let seq = 0, busy = false, online = false, shooting = false, reviewN = null, dismissed = null;
+
+Guide.mount($("stage"));
+Guide.mountInfo($("info"));
+Guide.updateGuides($("age").value);
+
+function setStatus(t) { $("status").textContent = t || ""; }
+function showMsg(t) { msg.textContent = t; msg.classList.remove("hidden"); }
+const mirrored = () => $("mirror").checked;
+function applyMirror() { feed.classList.toggle("mirror", mirrored()); }
+
+function showReview(p) {
+  if (reviewN === p.n) return;
+  reviewN = p.n;
+  shooting = false;
+  preview.src = "/api/relay/pending.jpg?n=" + p.n;
+  preview.style.display = "block";
+  $("overlay").style.display = "none";
+  $("liveControls").classList.add("hidden");
+  $("reviewControls").classList.remove("hidden");
+  setStatus(Guide.sizeNote(p.w, p.h));
+}
+
+function leaveReview() {
+  dismissed = reviewN;
+  reviewN = null;
+  preview.style.display = "none";
+  $("overlay").style.display = "";
+  $("reviewControls").classList.add("hidden");
+  $("liveControls").classList.remove("hidden");
+  setStatus("");
+}
+
+function apply(j) {
+  online = j.online;
+  $("shoot").disabled = !online || shooting;
+  if (j.pending && j.pending.n !== dismissed) { showReview(j.pending); return; }
+  if (reviewN !== null) leaveReview();
+  if (!online) {
+    showMsg("Waiting for the camera. On the phone open " + location.origin + "/camera");
+    return;
+  }
+  msg.classList.add("hidden");
+  if (j.seq < seq) seq = 0;     // server restarted
+  if (j.frame) { feed.src = "data:image/jpeg;base64," + j.frame; seq = j.seq; }
+  if (j.analysis) Guide.render(j.analysis, mirrored(), $("age").value);
+}
+
+async function poll() {
+  if (busy) return;
+  busy = true;
+  try {
+    const r = await fetch("/api/relay/state?after=" + seq, { cache: "no-store" });
+    apply(await r.json());
+  } catch (e) {
+    online = false;
+    $("shoot").disabled = true;
+    showMsg("Server not reachable, retrying...");
+  } finally { busy = false; }
+}
+
+function startShot() {
+  if (!online || shooting || reviewN !== null) return;
+  shooting = true;
+  $("shoot").disabled = true;
+  const go = async () => {
+    setStatus("Capturing on the camera device...");
+    try {
+      const r = await fetch("/api/relay/shoot", { method: "POST" });
+      if (!r.ok) throw new Error("HTTP " + r.status);
+    } catch (e) {
+      shooting = false;
+      setStatus("Could not send the command: " + e.message);
+      return;
+    }
+    setTimeout(() => {
+      if (shooting) { shooting = false; setStatus("No photo received. Is the camera page still open?"); }
+    }, 10000);
+  };
+  if ($("timer").checked) Guide.countdown(5, go); else go();
+}
+
+async function retake() {
+  try { await fetch("/api/relay/discard", { method: "POST" }); } catch (e) { /* ignore */ }
+  leaveReview();
+}
+
+async function save() {
+  $("save").disabled = true;
+  try {
+    const r = await fetch("/api/relay/save", { method: "POST" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    leaveReview();
+    Guide.showSaved($("status"), j.name);
+    Guide.loadGallery($("gallery"));
+  } catch (e) {
+    setStatus("Save failed: " + e.message);
+  } finally { $("save").disabled = false; }
+}
+
+$("shoot").onclick = startShot;
+$("retake").onclick = retake;
+$("save").onclick = save;
+$("age").onchange = () => Guide.updateGuides($("age").value);
+$("mirror").onchange = applyMirror;
+document.addEventListener("keydown", (e) => {
+  if (e.code !== "Space" || ["SELECT", "INPUT", "BUTTON", "A"].includes(document.activeElement.tagName)) return;
+  e.preventDefault();
+  startShot();
+});
+
+applyMirror();
+showMsg("Waiting for the camera. On the phone open " + location.origin + "/camera");
+setInterval(poll, 120);
+Guide.loadGallery($("gallery"));
+</script>
+</body>
+</html>
