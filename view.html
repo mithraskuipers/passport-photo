@@ -8,7 +8,13 @@
 <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
-<main>
+<main class="wide">
+  <aside class="side left">
+    <h2>Live checks</h2>
+    <ul id="checks"></ul>
+  </aside>
+
+  <section class="center">
   <div class="stage" id="stage">
     <img id="feed" alt="">
     <img id="preview" alt="Captured photo">
@@ -23,19 +29,25 @@
     <button id="save">Save</button>
   </div>
 
-  <div class="opts">
-    <label>Age <select id="age"><option value="adult">11 years and older</option><option value="child">Up to 10 years</option></select></label>
-    <label><input type="checkbox" id="timer"> 5 s timer</label>
-    <label><input type="checkbox" id="mirror" checked> Mirror view</label>
-  </div>
-  <div id="retouch"></div>
-  <ul id="checks"></ul>
-  <div id="info"></div>
   <div id="status"></div>
   <p class="links"><a href="/">Back to menu</a></p>
+  </section>
 
-  <h2>Saved photos</h2>
-  <div id="gallery"></div>
+  <aside class="side right">
+    <h2>Settings</h2>
+    <div class="opts">
+      <label>Age <select id="age"><option value="adult">11 years and older</option><option value="child">Up to 10 years</option></select></label>
+      <label><input type="checkbox" id="timer"> 5 s timer</label>
+      <label><input type="checkbox" id="mirror" checked> Mirror view</label>
+    </div>
+    <div id="retouch"></div>
+    <div id="info"></div>
+  </aside>
+
+  <section class="full">
+    <h2>Saved photos</h2>
+    <div id="gallery"></div>
+  </section>
 </main>
 
 <script src="/assets/guide.js"></script>

@@ -58,4 +58,21 @@ h1 { font-size: 22px; margin: 8px 2px 4px; }
 .rt-row input[type=range] { flex: 1; }
 .rt-row output { min-width: 40px; text-align: right; color: #ccc; }
 .rt-warn { margin: 10px 0 0; font-size: 13px; color: #f5b942; line-height: 1.4; }
+/* Viewer page: checks on the left, video in the middle, settings on the right, all visible without scrolling */
+main.wide { max-width: 1500px; display: grid; grid-template-columns: minmax(240px, 1fr) minmax(0, 660px) minmax(240px, 1fr);
+            gap: 20px; align-items: start; }
+main.wide .center { min-width: 0; }
+main.wide .stage { width: min(100%, calc(74vh * 7 / 9)); }
+main.wide .side { position: sticky; top: 12px; min-width: 0; }
+main.wide .side h2 { margin-top: 4px; }
+main.wide .side .opts { flex-direction: column; align-items: flex-start; gap: 10px; margin-top: 0; }
+main.wide .full { grid-column: 1 / -1; }
+@media (max-width: 1000px) {
+  main.wide { max-width: 640px; display: flex; flex-direction: column; gap: 0; }
+  main.wide .center { order: 0; }
+  main.wide .left { order: 1; position: static; }
+  main.wide .right { order: 2; position: static; }
+  main.wide .full { order: 3; }
+  main.wide .stage { width: min(100%, calc(82vh * 7 / 9)); }
+}
 canvas { display: none; }
