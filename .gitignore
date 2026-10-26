@@ -1,0 +1,5 @@
+.venv/
+certs/
+photos/
+__pycache__/
+*.pyc
